@@ -147,7 +147,7 @@ free_process_tree(void)
 static int
 pid_compare(const tracked_process_instance_t *tpi1, const tracked_process_instance_t *tpi2)
 {
-	return tpi1->pid - tpi2->pid;
+	return less_equal_greater_than(tpi1->pid, tpi2->pid);
 }
 
 static inline tracked_process_instance_t *
@@ -1144,7 +1144,7 @@ read_process_update(thread_ref_t thread)
 {
 	handle_proc_ev(thread->u.f.fd);
 
-	read_thread = thread_add_read(thread->master, read_process_update, NULL, thread->u.f.fd, TIMER_NEVER, false);
+	read_thread = thread_add_read(thread->master, read_process_update, NULL, thread->u.f.fd, TIMER_NEVER, 0);
 }
 
 static void
@@ -1217,7 +1217,7 @@ init_track_processes(list_head_t *processes)
 
 	read_procs(processes);
 
-	read_thread = thread_add_read(master, read_process_update, NULL, nl_sock, TIMER_NEVER, false);
+	read_thread = thread_add_read(master, read_process_update, NULL, nl_sock, TIMER_NEVER, 0);
 
 	return rc;
 }
@@ -1232,7 +1232,7 @@ reload_track_processes(void)
 	read_procs(&vrrp_data->vrrp_track_processes);
 
 	/* Add read thread */
-	read_thread = thread_add_read(master, read_process_update, NULL, nl_sock, TIMER_NEVER, false);
+	read_thread = thread_add_read(master, read_process_update, NULL, nl_sock, TIMER_NEVER, 0);
 
 	return;
 }

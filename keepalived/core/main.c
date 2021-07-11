@@ -38,6 +38,7 @@
 #include <getopt.h>
 #include <linux/version.h>
 #include <ctype.h>
+#include <sys/prctl.h>
 
 #include "main.h"
 #include "global_data.h"
@@ -314,6 +315,9 @@ free_parent_mallocs_startup(bool am_child)
 		syslog_ident = NULL;
 
 		FREE_PTR(orig_core_dump_pattern);
+
+		free_notify_script(&global_data->startup_script);
+		free_notify_script(&global_data->shutdown_script);
 	}
 
 	if (free_main_pidfile) {
@@ -470,7 +474,7 @@ create_reload_file(void)
 		umask(umask_val);
 }
 
-static inline void
+static void
 remove_reload_file(void)
 {
 	if (global_data->reload_file && !__test_bit(CONFIG_TEST_BIT, &debug))
@@ -734,6 +738,21 @@ config_test_exit(void)
 	}
 }
 
+static unsigned
+check_start_stop_script_secure(notify_script_t **script, magic_t magic)
+{
+	unsigned flags;
+
+	flags = check_script_secure(*script, magic);
+
+	/* Mark not to run if needs inhibiting */
+	if (flags & (SC_INHIBIT | SC_NOTFOUND) ||
+	    !(flags & (SC_EXECUTABLE | SC_SYSTEM)))
+		free_notify_script(script);
+
+	return flags;
+}
+
 #ifndef _ONE_PROCESS_DEBUG_
 static bool reload_config(void)
 {
@@ -819,6 +838,26 @@ static bool reload_config(void)
 		free_global_data (old_global_data);
 	}
 
+	/* There is no point checking the script security of the
+	 * startup script, since we won't run it after a reload.
+	 */
+	if (global_data->shutdown_script) {
+		magic_t magic;
+		unsigned script_flags;
+
+		magic = ka_magic_open();
+
+		script_flags = check_start_stop_script_secure(&global_data->shutdown_script, magic);
+
+		if (magic)
+			ka_magic_close(magic);
+
+		if (!script_security && script_flags & SC_ISSCRIPT) {
+			report_config_error(CONFIG_SECURITY_ERROR, "SECURITY VIOLATION - start/shutdown scripts are being executed but script_security not enabled.%s",
+						script_flags & SC_INSECURE ? " There are insecure scripts." : "");
+		}
+	}
+
 	if (global_data->reload_time_file)
 		start_reload_monitor();
 
@@ -832,19 +871,21 @@ print_parent_data(__attribute__((unused)) thread_ref_t thread)
 
 	log_message(LOG_INFO, "Printing parent data for process(%d) on signal", getpid());
 
-	fp = fopen_safe(dump_file, "w");
+	fp = open_dump_file(dump_file);
 
-	if (!fp) {
-		log_message(LOG_INFO, "Can't open %s (%d: %s)",
-			dump_file, errno, strerror(errno));
+	if (!fp)
 		return;
-	}
 
 	dump_global_data(fp, global_data);
 
 	fclose(fp);
+}
 
-	return;
+void
+reinitialise_global_vars(void)
+{
+	default_script_uid = 0;
+	default_script_gid = 0;
 }
 
 /* SIGHUP/USR1/USR2/STATS_CLEAR handler */
@@ -887,6 +928,8 @@ propagate_signal(__attribute__((unused)) void *v, int sig)
 static void
 do_reload(void)
 {
+	reinitialise_global_vars();
+
 	if (!reload_config())
 		return;
 
@@ -1021,9 +1064,11 @@ start_validate_reload_conf_child(void)
 	FREE_PTR(config_fd_str);
 }
 
-static void
-process_reload_signal(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
+void
+start_reload(thread_ref_t thread)
 {
+	if (thread && __test_bit(LOG_DETAIL_BIT, &debug))
+		log_message(LOG_INFO, "Processing queued reload");
 
 	/* if reload_check_config is configured, validate the new config before reload */
 	if (!global_data->reload_check_config) {
@@ -1036,6 +1081,16 @@ process_reload_signal(__attribute__((unused)) void *v, __attribute__((unused)) i
 
 	start_validate_reload_conf_child();
 }
+
+static void
+process_reload_signal(__attribute__((unused)) void *v, __attribute__((unused)) int sig)
+{
+	if (!num_reloading)
+		start_reload(NULL);
+	else
+		queue_reload();
+}
+
 #endif
 
 #ifdef THREAD_DUMP
@@ -1742,7 +1797,7 @@ usage(const char *prog)
 	fprintf(stderr, "  -r, --vrrp_pid=FILE          Use specified pidfile for VRRP child process\n");
 #endif
 #ifdef _WITH_LVS_
-	fprintf(stderr, "  -T, --genhash                Enter into genhash utility mode.\n");
+	fprintf(stderr, "  -T, --genhash                Enter into genhash utility mode (this should be the first option used).\n");
 	fprintf(stderr, "  -c, --checkers_pid=FILE      Use specified pidfile for checkers child process\n");
 	fprintf(stderr, "  -a, --address-monitoring     Report all address additions/deletions notified via netlink\n");
 #endif
@@ -1865,6 +1920,9 @@ parse_cmdline(int argc, char **argv)
 	unsigned facility;
 	mode_t new_umask_val;
 	unsigned i;
+#ifdef _WITH_LVS_
+	bool first_option;
+#endif
 
 	struct option long_options[] = {
 		{"use-file",		required_argument,	NULL, 'f'},
@@ -1901,7 +1959,7 @@ parse_cmdline(int argc, char **argv)
 		{"vrrp_pid",		required_argument,	NULL, 'r'},
 #endif
 #ifdef _WITH_LVS_
-		{"genhash",		optional_argument,	NULL, 'T'},
+		{"genhash",		no_argument,		NULL, 'T'},
 		{"checkers_pid",	required_argument,	NULL, 'c'},
 		{"address-monitoring",	no_argument,		NULL, 'a'},
 #endif
@@ -1941,6 +1999,10 @@ parse_cmdline(int argc, char **argv)
 	 * of longindex, so we need to ensure that before calling getopt_long(), longindex
 	 * is set to a known invalid value */
 	curind = optind;
+#ifdef _WITH_LVS_
+	first_option = true;
+#endif
+
 	/* Used short options: ABCDGILMPRSVXabcdefghilmnprstuvx */
 	while (longindex = -1, (c = getopt_long(argc, argv, ":vhlndu:DRS:f:p:i:es:mM::g::Gt::"
 #if defined _WITH_VRRP_ && defined _WITH_LVS_
@@ -1950,7 +2012,7 @@ parse_cmdline(int argc, char **argv)
 					    "r:VX"
 #endif
 #ifdef _WITH_LVS_
-					    "ac:IT:"
+					    "ac:IT"
 #endif
 #ifdef _WITH_BFD_
 					    "Bb:"
@@ -2012,7 +2074,13 @@ parse_cmdline(int argc, char **argv)
 			__set_bit(DONT_RELEASE_IPVS_BIT, &debug);
 			break;
 		case 'T':
-			check_genhash(argc, argv);
+			if (!first_option)
+				fprintf(stderr, "Warning -- `%s` not used as first option, previous options ignored\n", longindex == -1 ? "-T" : long_options[longindex].name);
+
+			/* Set our process name */
+			prctl(PR_SET_NAME, "genhash");
+
+			check_genhash(false, argc, argv);
 			exit(0);
 #endif
 		case 'D':
@@ -2231,6 +2299,9 @@ parse_cmdline(int argc, char **argv)
 			break;
 		}
 		curind = optind;
+#ifdef _WITH_LVS_
+		first_option = false;
+#endif
 	}
 
 	if (optind < argc) {
@@ -2257,6 +2328,9 @@ register_parent_thread_addresses(void)
 {
 	register_scheduler_addresses();
 	register_signal_thread_addresses();
+#ifndef _ONE_PROCESS_DEBUG_
+	register_config_notify_addresses();
+#endif
 
 #ifdef _WITH_LVS_
 	register_check_parent_addresses();
@@ -2285,21 +2359,6 @@ register_parent_thread_addresses(void)
 }
 #endif
 
-static unsigned
-check_start_stop_script_secure(notify_script_t **script, magic_t magic)
-{
-	unsigned flags;
-
-	flags = check_notify_script_secure(script, magic);
-
-	/* Mark not to run if needs inhibiting */
-	if (flags & (SC_INHIBIT | SC_NOTFOUND) ||
-	    !(flags & (SC_EXECUTABLE | SC_SYSTEM)))
-		free_notify_script(script);
-
-	return flags;
-}
-
 /* Entry point */
 int
 keepalived_main(int argc, char **argv)
@@ -2312,6 +2371,14 @@ keepalived_main(int argc, char **argv)
 	unsigned script_flags;
 	struct rusage usage;
 	struct rusage child_usage;
+
+#ifdef _WITH_LVS_
+	char *name = strrchr(argv[0], '/');
+	if (!strcmp(name ? name + 1 : argv[0], "genhash")) {
+		check_genhash(true, argc, argv);
+		/* Not reached */
+	}
+#endif
 
 #ifdef _MEM_CHECK_
 	__set_bit(MEM_CHECK_BIT, &debug);

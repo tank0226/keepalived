@@ -91,19 +91,41 @@ a non root user.
 
 All scripts should be written so that they will terminate on receipt of a SIGTERM
 signal. Scripts will be sent SIGTERM if their parent terminates, or it is a script
-the keepalived is awaiting its exit status and it has run for too long.
+that keepalived is awaiting its exit status and it has run for too long.
 .PP
 .SH Quoted strings
-Quoted strings are specified between " characters; more specifically a string
-will only end after a quoted string if there is whitespace afterwards. For
-example:
+Quoted strings are specified between " or ' characters and strings are delimited by
+whitespace. In the examples below the \' characters are not part of the strings and should not be specified:
+
 .nf
 .RS
-"abcd" efg h jkl "mnop"
+\'abcd" efg h jkl "mnop\'
+.RE
+
+.fi
+will be the single string:
+
+.nf
+.RS
+\'abcd efg h jkl mnop\'
+.RE
+
+whereas:
+
+.nf
+.RS
+\'abcd "efg h jkl" mnop\'
 .RE
 .fi
-will be the single string "abcd efg h jkl mnop", i.e. the embedded " characters
-are removed.
+
+will be the three strings:
+
+.nf
+.RS
+\'abcd\', \'efg h jkl\' and \'mnop\'
+.RE
+
+i.e. the " and ' characters are removed and any intervening whitespace is retained.
 .PP
 Quoted strings can also have escaped characters, like the shell. \\a, \\b, \\E, \\f,
 \\n, \\r, \\t, \\v, \\nnn and \\xXX (where nnn is up to 3 octal digits, and XX is any
@@ -164,7 +186,7 @@ and
 \fBnet_namespace_ipvs \fRNAME
 
 # ipsets wasn't network namespace aware until Linux 3.13, and so
-# if running with # an earlier version of the kernel, by default
+# if running with an earlier version of the kernel, by default
 # use of ipsets is disabled if using a namespace and vrrp_ipsets
 # has not been specified. This options overrides the default and
 # allows ipsets to be used with a namespace on kernels prior to 3.13.
@@ -187,6 +209,11 @@ and
 # in seconds. This can be needed for very large configurations.
 # (default: 5)
 \fBchild_wait_time \fRSECS
+
+Note: All processes/scripts run by keepalived are run with parent death signal set
+to SIGTERM. All such processes/scripts should either not change the action for
+SIGTERM, or ensure that the process/script terminates once SIGTERM is received,
+possibly following any cleanup actions needed.
 
 # Global definitions configuration block
 \fBglobal_defs \fR{
@@ -690,11 +717,11 @@ and
 
     # Allow configuration to include interfaces that don't exist at startup.
     # This allows keepalived to work with interfaces that may be deleted and restored
-    #   and also allows virtual and static routes and rules on VMAC interfaces.
-    #   allow_if_changes allows an interface to be deleted and recreated with a
-    #   different type or underlying interface, eg changing from vlan to macvlan
-    #   or changing a macvlan from eth1 to eth2. This is predominantly used for
-    #   reporting duplicate VRID errors at startup if allow_if_changes is not set.
+    # and also allows virtual and static routes and rules on VMAC interfaces.
+    # allow_if_changes allows an interface to be deleted and recreated with a
+    # different type or underlying interface, eg changing from vlan to macvlan
+    # or changing a macvlan from eth1 to eth2. This is predominantly used for
+    # reporting duplicate VRID errors at startup if allow_if_changes is not set.
     \fBdynamic_interfaces [allow_if_changes]\fR
 
     # The following options are only needed for large configurations, where either
@@ -865,6 +892,17 @@ and
     # file, if update process creates the reload_file with non-zero size, it can detect
     # the reloading starting by the reload_file becoming zero length.
     \fBreload_file\fR [ABSOLUTE-PATHNAME-OF-FILE]
+
+    # Sending SIGUSR1 to keepalived causes it to dump its data structures
+    # for debugging purposes, although some users use this feature and
+    # process the output. Please note that the format of the .data files
+    # produced is not guaranteed to maintain backward compatibility.
+    # The standard file names are keepalived_parent.data, keepalived.data,
+    # keepalived_check.data and keepalived_bfd.data. This causes a problem
+    # if more than one keepalived instance is running on a system.
+    # In order to alleviate this, enabling data_use_instance includes the
+    # instance name and network namespace in the file name of the .data files.
+    \fBdata_use_instance \fR[<BOOL>]
 }
 .fi
 .SH Linkbeat interfaces
@@ -1412,7 +1450,7 @@ The syntax for vrrp_sync_group is :
     #   $(n-3) and $(n-1) are ALWAYS sent in uppercase, and the possible
     # strings sent are the same ones listed above
     #   ("GROUP"/"INSTANCE", "MASTER"/"BACKUP"/"FAULT"/"STOP"/"DELETED")
-    # (note: STOP and DELETED are only applicable to instances)
+    # (note: DELETED is only applicable to instances)
     \fBnotify \fR<STRING>|<QUOTED-STRING> [username [groupname]]
 
     # The notify fifo output is the same as the last 4 parameters for the "notify"
@@ -1558,7 +1596,13 @@ The syntax for vrrp_instance is :
     # the virtual ip addresses determine whether IPv4 or IPv6 is used).
     \fBnative_ipv6\fR
 
-    # Ignore VRRP interface faults (default unset)
+    # Ignore VRRP interface faults (default unset).
+    # Note: when using IPv6, setting the interface administratively down, e.g.
+    #   'ip link set IF down' will by default cause all IPv6 addresses to be
+    #   deleted from the interface, and consequently the VRRP instance will
+    #   go to fault state due to the addresses being deleted. Setting sysctl
+    #   net.ipv6.conf.IF.keep_addr_on_down to 1 will allow non link-local addresses
+    #   to remain when the interface is downed.
     \fBdont_track_primary\fR
 
     # optional, monitor these as well.
@@ -1844,7 +1888,19 @@ The syntax for vrrp_instance is :
     # for backwards compatibility
     \fBpreempt\fR
 
-    # Seconds after startup or seeing a lower priority master until preemption
+    # Seconds of delay until preemption after getting the advertisement timeout
+    # at startup or when seeing a lower priority master.
+    #
+    # Since it is a delay, it cannot speed up taking over as master.
+    # "preempt_delay" specifies the time in seconds to delay preempting compared
+    # to if "preempt_delay" is not specified. Advertisement timeout is
+    # 3 * advert_int + skew_time. Skew_time is defined by RFC3768 and RFC5798.
+    #
+    # So if "advert_int" is 1, and priority is 128, the instance would normally
+    # wait 3.5 seconds before taking over as master. If "preempt_delay 2" is
+    # specified, then the delay before taking over as master would be approximately
+    # 5.5 seconds.
+    #
     # (if not disabled by "nopreempt").
     # Range: 0 (default) to 1000 (e.g. 4.12)
     # NOTE: For this to work, the initial state must not be MASTER.
@@ -2043,6 +2099,11 @@ The syntax for virtual_server is :
     # Overridden by virtualhost config of real server or checker
     \fBvirtualhost \fR<STRING>
 
+    # snmp_name is a text string that is returned as part of the snmp
+    # data for this virtual server. It can be used to help identify the
+    # virtual server when parsing SNMP output.
+    \fBsnmp_name \fR<STRING>
+
     # On daemon startup assume that all RSs are down
     # and healthchecks failed. This helps to prevent
     # false positives on startup. Alpha mode is
@@ -2147,6 +2208,11 @@ The syntax for virtual_server is :
         # eg virtualhost www.firewall.loc
         # Overridden by virtualhost config of a checker
         \fBvirtualhost \fR<STRING>
+
+	# snmp_name is a text string that is returned as part of the snmp
+	# data for this real server. It can be used to help identify the
+	# real server when parsing SNMP output.
+	\fBsnmp_name \fR<STRING>
 
         \fBalpha \fR<BOOL>                    # see above
         \fBconnect_timeout \fR<TIMER>         # see above
@@ -2603,7 +2669,7 @@ Example:
 The above will create 2 virtual servers, each with 3 real servers
 .SH Pre-defined definitions
 .PP
-The following pre-defined definitions are defined:
+The following definitions are pre-defined:
 .sp
 \fB${_PWD} : \fRThe directory of the current configuration file (this can be changed if using the include directive).
 .br

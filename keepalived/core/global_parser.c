@@ -284,6 +284,11 @@ startup_shutdown_script(const vector_t *strvec, notify_script_t **script, bool s
 {
 	const char *type = startup ? "startup" : "shutdown";
 
+#ifndef _ONE_PROCESS_DEBUG_
+	if (prog_type != PROG_TYPE_PARENT)
+		return;
+#endif
+
 	if (*script) {
 		report_config_error(CONFIG_GENERAL_ERROR, "%s script already specified", type);
 		return;
@@ -314,6 +319,11 @@ startup_shutdown_script_timeout_handler(const vector_t *strvec, bool startup)
 	const char *type = startup ? "startup" : "shutdown";
 	unsigned delay;
 
+#ifndef _ONE_PROCESS_DEBUG_
+	if (prog_type != PROG_TYPE_PARENT)
+		return;
+#endif
+
 	if (vector_size(strvec) < 2) {
 		report_config_error(CONFIG_GENERAL_ERROR, "%s_script_timeout requires value", type);
 		return;
@@ -332,12 +342,14 @@ startup_shutdown_script_timeout_handler(const vector_t *strvec, bool startup)
 static void
 startup_script_handler(const vector_t *strvec)
 {
+	/* Only applicable for the parent process */
 	startup_shutdown_script(strvec, &global_data->startup_script, true);
 }
 
 static void
 startup_script_timeout_handler(const vector_t *strvec)
 {
+	/* Only applicable for the parent process */
 	startup_shutdown_script_timeout_handler(strvec, true);
 }
 
@@ -2129,6 +2141,21 @@ config_copy_directory_handler(const vector_t *strvec)
 		report_config_error(CONFIG_GENERAL_ERROR, "%s missing directory name", strvec_slot(strvec, 0));
 }
 
+static void
+data_use_instance_handler(const vector_t *strvec)
+{
+	int res = true;
+
+	if (vector_size(strvec) >= 2) {
+		res = check_true_false(strvec_slot(strvec,1));
+		if (res < 0) {
+			report_config_error(CONFIG_GENERAL_ERROR, "Invalid value '%s' for global date_use_instance specified", strvec_slot(strvec, 1));
+			return;
+		}
+	}
+
+	global_data->data_use_instance = res;
+}
 void
 init_global_keywords(bool global_active)
 {
@@ -2332,4 +2359,5 @@ init_global_keywords(bool global_active)
 	install_keyword("include_check", &include_check_handler);
 #endif
 	install_keyword("tmp_config_directory", &config_copy_directory_handler);
+	install_keyword("data_use_instance", &data_use_instance_handler);
 }

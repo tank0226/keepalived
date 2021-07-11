@@ -26,6 +26,7 @@
 #include "config.h"
 
 #include <fcntl.h>
+#include <openssl/md5.h>
 #include <openssl/err.h>
 
 #include "check_ssl.h"
@@ -305,21 +306,26 @@ ssl_read_thread(thread_ref_t thread)
 	if (req->error == SSL_ERROR_WANT_READ) {
 		 /* async read unfinished */
 		thread_add_read(thread->master, ssl_read_thread, checker,
-				thread->u.f.fd, timeout, true);
+				thread->u.f.fd, timeout, THREAD_DESTROY_CLOSE_FD);
 	} else if (r > 0 && req->error == SSL_ERROR_NONE) {
 		/* Handle response stream */
-		http_process_response(req, (size_t)r, url);
+		http_process_response(thread, req, (size_t)r, url);
 
 		/*
 		 * Register next ssl stream reader.
 		 * Register itself to not perturbe global I/O multiplexer.
 		 */
 		thread_add_read(thread->master, ssl_read_thread, checker,
-				thread->u.f.fd, timeout, true);
+				thread->u.f.fd, timeout, THREAD_DESTROY_CLOSE_FD);
 	} else if (req->error) {
 		/* All the SSL stream has been parsed */
-		if (url->digest)
-			MD5_Final(digest, &req->context);
+		if (url->digest) {
+			EVP_DigestFinal_ex(req->context, digest, NULL);
+			EVP_MD_CTX_free(req->context);
+			req->context = NULL;
+			if (http_get_check->genhash_flags & GENHASH_VERBOSE)
+				dump_digest(digest, MD5_DIGEST_LENGTH);
+		}
 		SSL_set_quiet_shutdown(req->ssl, 1);
 
 		r = (req->error == SSL_ERROR_ZERO_RETURN) ? SSL_shutdown(req->ssl) : 0;

@@ -172,8 +172,6 @@ AC_ARG_ENABLE(dbus,
   [AS_HELP_STRING([--enable-dbus], [compile with dbus support])])
 AC_ARG_ENABLE(dbus-create-instance,
   [AS_HELP_STRING([--enable-dbus-create-instance], [compile with dbus support for creating instances])])
-AC_ARG_ENABLE(sha1,
-  [AS_HELP_STRING([--enable-sha1], [compile with SHA1 support])])
 AC_ARG_ENABLE(regex,
   [AS_HELP_STRING([--enable-regex], [build with HTTP_GET regex checking])])
 AC_ARG_ENABLE(vmac,
@@ -1088,14 +1086,14 @@ AC_CHECK_DECLS([ETHERTYPE_IPV6], [],
 
 dnl ----[ Checks for openssl ]----
 # check for openssl headers
-NEED_MD5=no
+NEED_EVP=no
 NEED_SSL=no
 if test "$enable_vrrp" != no -a \
 	"$enable_vrrp_auth" != no; then
-  NEED_MD5=yes
+  NEED_EVP=yes
 fi
 if test "$enable_lvs" != no; then
-  NEED_MD5=yes
+  NEED_EVP=yes
   NEED_SSL=yes
 fi
 AC_CHECK_HEADERS([openssl/ssl.h openssl/err.h], [],
@@ -1108,14 +1106,14 @@ AC_CHECK_HEADERS([openssl/ssl.h openssl/err.h], [],
     NEED_SSL=no
     break
   ])
-AC_CHECK_HEADERS([openssl/md5.h], [],
+AC_CHECK_HEADERS([openssl/md5.h openssl/evp.h], [],
   [
-    if test $NEED_MD5 = yes; then
+    if test $NEED_EVP = yes; then
       AC_MSG_ERROR([
   !!! OpenSSL is not properly installed on your system. !!!
-  !!! Can not include OpenSSL MD5 headers files.        !!!])
+  !!! Can not include OpenSSL EVP headers files.        !!!])
     fi
-    NEED_MD5=no
+    NEED_EVP=no
     break
   ])
 unset LIBS
@@ -1128,13 +1126,13 @@ else
 fi
 
 EXTRA_LIBS=`echo $OPENSSL_LIBS | sed -e "s/-lcrypto//"`
-AC_CHECK_LIB(crypto, MD5_Init, [],
+AC_CHECK_LIB(crypto, EVP_DigestInit_ex, [],
   [
-    if test $NEED_MD5 = yes; then
-      AC_MSG_ERROR([OpenSSL MD5 libraries are required])
+    if test $NEED_EVP = yes; then
+      AC_MSG_ERROR([OpenSSL EVP libraries are required])
     fi
   ], [$EXTRA_LIBS])
-if test $NEED_MD5 = yes; then
+if test $NEED_EVP = yes; then
   add_to_var([KA_LIBS], [$LIBS])
 fi
 unset LIBS
@@ -1877,6 +1875,8 @@ if test "$enable_vrrp" != no; then
         #include <linux/if_link.h>
       ]])
     if test $IPVLAN_SUPPORT = Yes; then
+      dnl - IPVLAN_MODE_L3S since Linux 4.9, IFLA_IPVLAN_FLAGS since Linux 4.15
+      AC_CHECK_DECLS([IPVLAN_MODE_L3S, IFLA_IPVLAN_FLAGS])
       AC_DEFINE([_HAVE_VRRP_IPVLAN_], [ 1 ], [Define to 1 if have IP VLAN support])
       add_system_opt([VRRP_IPVLAN])
     fi
@@ -2263,26 +2263,6 @@ if test "$enable_dbus" = yes; then
 fi
 AM_CONDITIONAL([WITH_DBUS], [test $DBUS_SUPPORT = Yes])
 AM_CONDITIONAL([DBUS_CREATE_INSTANCE], [test $DBUS_CREATE_INSTANCE = Yes])
-
-dnl ----[ SHA1 or not ? ]----
-SHA1_SUPPORT=No
-if test "${enable_sha1}" = yes; then
-  AC_CHECK_HEADERS(openssl/sha.h,,AC_MSG_ERROR([unable to find openssl/sha.h]))
-  AC_CHECK_LIB(crypto, SHA1_Init,,
-    [
-      dnl libcrypto can require -fpic
-      AS_UNSET([ac_cv_lib_crypto_SHA1_Init])
-      SAV_CFLAGS=$CFLAGS
-      CFLAGS="$CFLAGS -fpic"
-      AC_CHECK_LIB(crypto, SHA1_Init,,AC_MSG_ERROR([SHA1 in OpenSSL required]))
-      CFLAGS=$SAV_CFLAGS
-      add_to_var([KA_CFLAGS],[-fpic])
-    ])
-  SHA1_SUPPORT=Yes
-  AC_DEFINE([_WITH_SHA1_], [ 1 ], [Define to 1 to have SHA1 support])
-fi
-AM_CONDITIONAL([WITH_SHA1], [test $SHA1_SUPPORT = Yes])
-unset LIBS
 
 dnl ----[ check for SO_MARK support ]----
 dnl -- Since Linux 2.6.25
@@ -2824,7 +2804,6 @@ echo "DBUS support             : ${DBUS_SUPPORT}"
 if test ${DBUS_SUPPORT} = Yes; then
   echo "DBUS create instance     : ${DBUS_CREATE_INSTANCE}"
 fi
-echo "SHA1 support             : ${SHA1_SUPPORT}"
 echo "Use JSON output          : ${ENABLE_JSON}"
 echo "libnl version            : ${NETLINK_VER}"
 echo "Use IPv4 devconf         : ${IPV4_DEVCONF}"
